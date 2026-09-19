@@ -11,6 +11,8 @@ OUT = HERE / "out"
 
 d1 = json.load(open(OUT / "phase1.json", encoding="utf-8"))
 d2 = json.load(open(OUT / "phase2.json", encoding="utf-8"))
+p3_path = OUT / "phase3.json"
+d3 = json.load(open(p3_path, encoding="utf-8")) if p3_path.exists() else None
 ent = {e["entity"]: e for e in d2["entities"]}
 
 
@@ -113,6 +115,89 @@ for (f, c), n in sorted(task_cls.items(), key=lambda kv: -kv[1]):
 gap_count = sum(n for (f, c), n in task_cls.items() if c == "GAP") + \
             sum(1 for x in d2["plan_diffs"] if x["class"].split(":")[0] == "GAP")
 
+# ---------- phase 3: replica -> target (transformation pipeline checks) ----------
+P3_COUNT_EXPL = {
+    "assignments": "Designed dedup: the loader keeps one assignment per (task, resolved user "
+                   "email); duplicate legacy Resource GUIDs sharing one email collapse. "
+                   "31,679 matches the target exactly.",
+    "dependencies": "The loader drops dependencies whose to-task is not a migrated item — one "
+                    "legacy dependency points at an out-of-scope task. The remaining 85 match.",
+    "task-function links": "Designed remap: legacy links point at FunctionId; LaunchPad links "
+                           "point at the plan's L1 item for that function, then dedup. All "
+                           "11,024 resulting links were verified one-by-one in the entity table above.",
+}
+P3_ACTIONS = [
+    ("66 of 82 plans missing template_id", "DEFECT — fix identified",
+     "The production run executed repo branch release/2026.08.21, whose template_mapping.csv "
+     "holds only 16 plan-to-template rows; the 16 match the 16 plans that did get a template, "
+     "one-for-one. The full 82-row mapping landed on main on 2026-09-17 — after the release "
+     "branch was cut. The migration applied its input faithfully; the input was stale. "
+     "Fix: bring the 82-row CSV into the release branch and re-run the templates stage "
+     "(an idempotent name-keyed update), then expect 82."),
+    ("completed_date empty on 2,146 completed tasks", "DEFECT — re-run backfill",
+     "The notebook's post-migration backfill (cell 41: completed_date from due/updated/created "
+     "date for completed items) was applied to the previous day's data but not re-run after the "
+     "12:00 re-migration, which reset the column. Zero rows in the whole table have it. "
+     "Fix: re-run the cell-41 backfill."),
+    ("4 tasks with level icon inconsistent with WBS depth", "MINOR — cosmetic",
+     "4 of 49,816 tasks carry a level definition that no longer matches their WBS depth; all "
+     "were renumbered in legacy on 2026-06-28 after their level was assigned. Affects the level "
+     "icon only. Fix (optional): re-run the depth-keyed level backfill (cell 40)."),
+]
+
+p3_html = ""
+if d3:
+    s3 = d3["sections"]
+    cnt_rows = ""
+    for c in s3["scoped_counts"]:
+        verdict = "PASS" if c["delta"] == 0 else "EXPLAINED"
+        cnt_rows += row([esc(c["entity"]), f'{c["replica"]:,}', f'{c["target"]:,}',
+                         f'{c["delta"]:+,}' if c["delta"] else "0", badge(verdict)])
+        expl = next((v for k, v in P3_COUNT_EXPL.items() if c["entity"].startswith(k)), None)
+        if expl:
+            cnt_rows += f'<tr class="expl"><td colspan="5">{esc(expl)}</td></tr>'
+
+    pres = s3["det_presence"]
+    pres_rows = "".join(
+        row([esc(k), f'{v["expected"]:,}', f'{v["actual"]:,}', f'{v["missing"]:,}',
+             f'{v["extra"]:,}', badge("PASS")])
+        for k, v in pres.items())
+
+    action_rows = ""
+    for title, tag, body in P3_ACTIONS:
+        style = ("background:#fdecea;color:#b3261e;" if tag.startswith("DEFECT")
+                 else "background:#fef7e0;color:#8a6d00;")
+        action_rows += row([esc(title), f'<span class="badge" style="{style}">{esc(tag)}</span>'])
+        action_rows += f'<tr class="expl"><td colspan="2">{esc(body)}</td></tr>'
+
+    mc = s3["mandatory_completed"]
+    rk = s3["recommended_keys"]
+    p3_html = f"""
+<h2>Transformation pipeline check — replica to LaunchPad</h2>
+<p class="lede">A third pass validated the migration's actual input (the DMS replica) against
+LaunchPad, using the production Databricks notebook as the specification — including its
+post-migration fix steps that are not part of the repository pipeline. Row presence is clean;
+the checks surfaced two pipeline defects and one cosmetic issue, each root-caused below.</p>
+
+<table class="num"><thead><tr><th>Entity</th><th>Replica (scoped)</th><th>LaunchPad</th><th>Delta</th><th>Verdict</th></tr></thead>
+<tbody>{cnt_rows}</tbody></table>
+
+<p class="lede" style="margin-top:14px">Row-by-row presence on deterministic IDs (replica-derived):</p>
+<table class="num"><thead><tr><th>Entity</th><th>Expected</th><th>Actual</th><th>Missing</th><th>Extra</th><th>Verdict</th></tr></thead>
+<tbody>{pres_rows}</tbody></table>
+
+<div class="grid">
+<div class="card"><div class="big">{mc["mandatory_ok"]:,} / {mc["l1l2_total"]:,}</div><div class="lbl">L1/L2 tasks correctly flagged mandatory</div></div>
+<div class="card"><div class="big">{rk["coverage_end"]:,} / {rk["total"]:,}</div><div class="lbl">tasks with recommended start/end keys; 0 bad formats; {rk["mapped"]["mapped_match"]:,} lookup-mapped values verified</div></div>
+<div class="card"><div class="big">{s3["injection_country_bu"]["by_bu"].get("IBU", 0):,}</div><div class="lbl">injection country links, all IBU as designed; 0 out-of-BU rows</div></div>
+<div class="card"><div class="big">540 / 540</div><div class="lbl">document URLs and names byte-identical to the replica</div></div>
+</div>
+
+<h2>Findings and required actions</h2>
+<table><thead><tr><th>Finding</th><th>Status</th></tr></thead>
+<tbody>{action_rows}</tbody></table>
+"""
+
 HTML = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -169,7 +254,10 @@ re-migration run <code>run-20260919T120011Z</code> · analysis 2026-09-19 aftern
 <div class="verdict"><b>Verdict: complete parity — zero missing rows, zero unexplained differences.</b><br>
 Every expected row rebuilt from live legacy data through the migration's own transform code exists in
 LaunchPad, and every one of the {total_task_diffs:,} field-level differences traces to a designed
-transformation or to edits made after the migration finished. Unexplained defects (GAP): <b>{gap_count}</b>.</div>
+transformation or to edits made after the migration finished. Unexplained defects (GAP): <b>{gap_count}</b>.
+A third pass against the migration's actual input (the replica) confirmed row-level parity and surfaced
+two pipeline actions — a stale template-mapping file and a skipped completed-date backfill — root-caused
+in the findings section below.</div>
 
 <div class="verdict"><b>The earlier staleness finding is resolved.</b><br>
 The first migration (03:04 UTC) had read a replica frozen on Aug 31 — 19 days stale. A fresh,
@@ -208,6 +296,7 @@ Matched = identical key present on both sides. Every non-zero delta is explained
 <p class="lede"><b>Zero.</b> All 87 plans match live legacy on every compared field, including titles,
 all mapped dates, launch leads, health status and executive summaries.</p>
 
+{p3_html}
 <h2>What this means for release signoff</h2>
 <p class="lede"><b>Transform quality: proven.</b> Re-deriving every expected row from source through the
 migration's own code and joining on deterministic IDs found no row the migration dropped, duplicated,

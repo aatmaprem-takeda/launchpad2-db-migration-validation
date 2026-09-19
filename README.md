@@ -83,6 +83,11 @@ $env:PYTHONIOENCODING='utf-8'
 # Phase 2 — full entity + field comparison (~10–15 min)
 .venv\Scripts\python phase2_compare.py        # writes out\phase2.json
 
+# Phase 3 — transformation-pipeline check: DMS replica -> LaunchPad (~5 min)
+# Validates the migration's ACTUAL input (the replica db "launchpad") against the
+# target, including the production notebook's post-migration fix steps.
+.venv\Scripts\python phase3_replica_check.py  # writes out\phase3.json
+
 # Report — self-contained HTML with every finding explained
 .venv\Scripts\python render_db_report.py      # writes out\db-migration-parity-report.html
 ```
@@ -102,6 +107,21 @@ full drill-down (open it in any browser — it has no external dependencies).
   edits made after the replica's sync position at migration time — closed by
   re-running the migration closer to cutover (the deterministic-ID upsert
   design makes repeat runs safe), not a code defect.
+- **Phase 3** compares the DMS replica (the migration's actual input) with the
+  target and re-checks the production notebook's post-load fix steps
+  (mandatory flags, completed dates, document URLs, recommended date keys,
+  injection countries, template assignment). On the 2026-09-19 reference run it
+  found row-level parity plus three findings:
+  1. **66 of 82 plans missing `template_id`** — version skew: the production
+     run executed branch `release/2026.08.21`, whose `template_mapping.csv` has
+     only 16 rows; the 82-row mapping landed on `main` on 2026-09-17, after the
+     branch was cut. Fix: bring the CSV into the release branch and re-run the
+     templates stage (idempotent), or backfill.
+  2. **`completed_date` empty on 2,146 completed tasks** — the notebook's
+     post-migration backfill (cell 41) was not re-run after the re-migration.
+     Fix: re-run that cell.
+  3. **4 tasks with a level definition inconsistent with WBS depth** —
+     cosmetic; legacy renumbering after level assignment.
 - One caveat baked into the classifier: legacy `Assignments`,
   `ProjectResources` and `SecondaryLaunchLeads` carry no timestamps, so their
   deltas can only be classified "consistent with post-snapshot churn", never
@@ -115,6 +135,7 @@ full drill-down (open it in any browser — it has no external dependencies).
 | `launchpad_prod_db.py` | Lakebase connector (token handling, read-only enforcement) |
 | `phase1_counts.py` | Scope + plan pairing |
 | `phase2_compare.py` | Entity presence + field diff + classification |
+| `phase3_replica_check.py` | Replica -> target pipeline check incl. notebook fix steps |
 | `render_db_report.py` | Self-contained HTML report |
 | `migration_ref/` | Vendored production migration code — the comparison spec. Do not edit. |
 | `PROMPT.md` | Agent prompt to run/extend this validation with an AI coding assistant |
