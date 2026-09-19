@@ -36,12 +36,14 @@ from scripts.migration.load_workplan_items import (_date_offset_key, _normalize_
 from scripts.migration.load_plans import DATE_MAP
 
 OUT = Path(__file__).resolve().parent / "out"
-MIG_START = datetime(2026, 9, 19, 3, 4, 0, tzinfo=timezone.utc)
-MIG_END = datetime(2026, 9, 19, 3, 7, 0, tzinfo=timezone.utc)
-# The migration source was a DMS replica whose freshest row is 2026-08-31 01:25:46 UTC
-# (max(updated_at) of migrated rows in target). Legacy edits after this never reached
-# the replica, so they are STALE_SOURCE, not transform gaps.
-SNAPSHOT_CUTOFF = datetime(2026, 8, 31, 1, 25, 47, tzinfo=timezone.utc)
+# Re-migration run-20260919T120011Z (lep.migration_audit): 12:00:16 -> 12:02:51 UTC.
+MIG_START = datetime(2026, 9, 19, 12, 0, 16, tzinfo=timezone.utc)
+MIG_END = datetime(2026, 9, 19, 12, 2, 51, tzinfo=timezone.utc)
+# The migration source is the DMS replica (Lakebase db "launchpad", created 2026-09-19
+# 09:41 UTC). Its sync position at migration time: freshest migrated row carries
+# 2026-09-19 11:15:25.16 UTC (max(updated_at) among rows written by the run). Legacy
+# edits after this never reached the replica, so they are STALE_SOURCE, not gaps.
+SNAPSHOT_CUTOFF = datetime(2026, 9, 19, 11, 15, 26, tzinfo=timezone.utc)
 
 
 def _d(v):
@@ -235,6 +237,10 @@ def main() -> None:
                 cls = "EXPLAINED:injection_milestone"
             elif f == "wbs_code":
                 cls = "EXPLAINED:wbs_renumber_candidate"
+            elif (isinstance(ev, str) and isinstance(av, str)
+                  and ev.split() == av.split()):
+                # post-migration app-side whitespace trim (content identical)
+                cls = "EXPLAINED:whitespace_only"
             elif _after_migration(a.get("updated_at")):
                 cls = "DRIFT:target_updated_after_migration"
             elif _after_migration(e.get("_src_updated")):
@@ -396,9 +402,26 @@ def main() -> None:
     for s in L["secondaryleads"]:
         _add_mem(s["Project"], s["Resource"], "secondary_launch_lead")
     sll_pairs = {(m["plan"], m["uid"]) for m in mem_rows if m["role"] == "secondary_launch_lead"}
+    # Loader final dedup HARD-DROPS (never upserts): any membership where the user
+    # is the plan's launch lead, and team_member rows where the user is an SLL on
+    # the same plan (load_memberships.py post-FK dedup steps 1-2).
+    ll_pairs = set()
+    for p in T["plans"]:
+        ll = p.get("launch_lead_id")
+        if ll:
+            em = (users_by_id.get(str(ll)) or {}).get("email")
+            if em:
+                ll_pairs.add((str(p["id_text"]), user_id_for_email(em)))
+    mem_dropped_ll = 0
+    mem_dropped_sll = 0
     for m in mem_rows:
-        if m["role"] == "team_member" and (m["plan"], m["uid"]) in sll_pairs:
-            m["is_deleted"] = True
+        pair = (m["plan"], m["uid"])
+        if pair in ll_pairs:
+            mem_dropped_ll += 1
+            continue
+        if m["role"] == "team_member" and pair in sll_pairs:
+            mem_dropped_sll += 1
+            continue
         exp_mem[m["mid"]] = m["is_deleted"]
     act_mem = {m["id"]: m for m in T["memberships"]}
     mem_missing = set(exp_mem) - set(act_mem)
@@ -410,6 +433,8 @@ def main() -> None:
                 "actual": len(act_mem), "matched": len(set(exp_mem) & set(act_mem)),
                 "missing": len(mem_missing), "added": len(mem_added),
                 "added_post_migration": len(mem_added_post),
+                "dedup_dropped_launch_lead": mem_dropped_ll,
+                "dedup_dropped_sll_overlap": mem_dropped_sll,
                 "is_deleted_flag_mismatches": len(mem_flag_mismatch),
                 "missing_ids": sorted(mem_missing)[:50],
                 "added_ids": sorted(mem_added - mem_added_post)[:50]})

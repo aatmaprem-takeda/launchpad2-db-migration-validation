@@ -22,14 +22,18 @@ non-SELECT statements. Never weaken that guard.
 
 Context you must use, not re-derive:
 - migration_ref/ contains the exact migration code that ran in production
-  (origin/main @ 26166fc, run id run-20260919T030419Z, executed
-  2026-09-19 03:04–03:07 UTC). Its transforms.py, scope.py, load_*.py and
+  (origin/main @ 26166fc). The production re-migration run id is
+  run-20260919T120011Z, executed 2026-09-19 12:00–12:03 UTC. Its
+  transforms.py, scope.py, load_*.py and
   deterministic uuid5 IDs are the specification for what "correctly migrated"
   means. Import them; do not re-implement them.
-- The migration read a DMS replica of legacy that stopped replicating at
-  2026-08-31 01:25:46 UTC, not live legacy data. Any legacy edit after that
-  instant is expected to be absent from LaunchPad. phase2_compare.py encodes
-  this as SNAPSHOT_CUTOFF.
+- The migration reads a continuously-syncing DMS replica of legacy (the
+  Lakebase database named "launchpad" on the same instance), not live legacy
+  directly. Any legacy edit made after the replica's sync position at
+  migration time is expected to be absent from LaunchPad. phase2_compare.py
+  encodes this as SNAPSHOT_CUTOFF — recompute it for a new run as
+  max(updated_at) among target workplan_items with updated_at before the
+  run's start.
 - lep.migration_audit in the target database records the run's stages and row
   counts — cross-check against it.
 
@@ -74,15 +78,17 @@ raw result before interpreting it.
 
 ---
 
-## What a clean run looks like (2026-09-19 reference)
+## What a clean run looks like (2026-09-19 re-migration, run-20260919T120011Z)
 
 - Phase 1: 87/87 plans paired, 0 missing, 0 unmatched; 717 out-of-scope
   plans excluded by brand scoping.
-- Phase 2: 0 GAP task field diffs, 0 GAP plan field diffs. All other buckets
-  explained: designed transforms (`EXPLAINED:*`), post-snapshot legacy churn
-  (`STALE_SOURCE`), post-migration app activity (`DRIFT` / added rows).
-- Open decision at that date: the 19-day-stale source snapshot (Aug 31
-  freeze vs Sept 19 run) — a business call, not a defect.
+- Phase 2: zero missing rows on every entity; 0 GAP task field diffs, 0 plan
+  field diffs. Remaining buckets explained: whitespace trimmed by a
+  post-migration cleanup, designed WBS renumbering, injection milestone
+  flags, and post-migration app activity (memberships, recomputed statuses).
+- Membership note: the loader deliberately drops redundant roles (user is
+  the plan's launch lead; team_member who is already a secondary launch lead
+  on the same plan). The comparator replicates those drops.
 
 If your run shows GAP > 0, that is new information: either the databases
 changed, or a classification rule needs review. Investigate before assuming

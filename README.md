@@ -11,7 +11,8 @@ additionally sets and verifies `default_transaction_read_only=on`.
 ## How it works
 
 The comparison does not re-invent the migration rules. The exact migration code
-that ran in production (`origin/main @ 26166fc`, run `run-20260919T030419Z`) is
+that ran in production (`origin/main @ 26166fc`, latest run
+`run-20260919T120011Z`) is
 vendored under `migration_ref/` and imported directly, so every transform,
 scope rule and deterministic uuid5 ID used in the comparison is the migration's
 own. The scripts rebuild the *expected* LaunchPad state from live legacy data
@@ -23,11 +24,13 @@ Every difference is classified, in this order:
 |---|---|
 | `EXPLAINED:<rule>` | A designed transformation (WBS renumbering, injection milestones, the cutover banner posted into legacy). |
 | `DRIFT` | Either side was edited **after** the migration ran — normal app activity, not a migration issue. |
-| `STALE_SOURCE` | Legacy was edited after the migration's source snapshot was taken (the DMS replica froze at **2026-08-31 01:25:46 UTC**; the migration ran 2026-09-19). Data faithfully copied, source just old. |
+| `STALE_SOURCE` | Legacy was edited after the migration source's replication position (the DMS replica syncs continuously with a small lag; `SNAPSHOT_CUTOFF` in `phase2_compare.py` records that position). Data faithfully copied; the edit simply arrived later. |
 | `GAP` | None of the above — a real, unexplained migration defect. **This is the number that must be zero.** |
 
-The 2026-09-19 run of this validation found **0 GAPs** across 87 plans,
-~50k tasks and ~130k child rows. See `PROMPT.md` to reproduce or extend it.
+The 2026-09-19 validation of re-migration `run-20260919T120011Z` (executed
+from a fresh, continuously-syncing DMS replica) found **complete parity**:
+zero missing rows on every entity and **0 GAPs** across 87 plans, ~50k tasks
+and ~130k child rows. See `PROMPT.md` to reproduce or extend it.
 
 ## Prerequisites
 
@@ -96,8 +99,9 @@ full drill-down (open it in any browser — it has no external dependencies).
 - **Phase 2** prints an entity matrix (expected / actual / matched / missing /
   added per entity type) and a field-diff classification table. Any `GAP` row
   is a defect: investigate it before signoff. `STALE_SOURCE` rows are legacy
-  edits the frozen replica never saw — a business decision (re-migrate from a
-  fresh replica, or accept the freeze), not a code defect.
+  edits made after the replica's sync position at migration time — closed by
+  re-running the migration closer to cutover (the deterministic-ID upsert
+  design makes repeat runs safe), not a code defect.
 - One caveat baked into the classifier: legacy `Assignments`,
   `ProjectResources` and `SecondaryLaunchLeads` carry no timestamps, so their
   deltas can only be classified "consistent with post-snapshot churn", never

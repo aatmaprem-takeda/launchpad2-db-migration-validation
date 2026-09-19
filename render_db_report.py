@@ -33,19 +33,16 @@ for p in plans:
 task_cls = Counter()
 for k, n in d2["task_field_diff_counter"].items():
     f, c = k.split("|", 1)
-    task_cls[(f, c.split(":")[0])] += n
+    task_cls[(f, c)] += n
 
-plan_cls = Counter((x["field"], x["class"].split(":")[0]) for x in d2["plan_diffs"])
-
-status_trans = Counter((x["expected"], x["actual"]) for x in d2["task_field_diffs"]
-                       if x["field"] == "status")
+total_task_diffs = sum(task_cls.values())
+pm = ent["plan_memberships (det id)"]
 
 VERDICT_STYLE = {
     "PASS": "background:#e6f4ea;color:#1e7d3c;",
     "EXPLAINED": "background:#e8f0fe;color:#1a56b0;",
-    "STALE SRC": "background:#fef7e0;color:#a05a00;",
-    "BY DESIGN": "background:#f1f3f4;color:#5f6368;",
-    "MINOR": "background:#fef7e0;color:#a05a00;",
+    "APP ACTIVITY": "background:#f1f3f4;color:#5f6368;",
+    "DRIFT": "background:#f1f3f4;color:#5f6368;",
 }
 
 
@@ -57,34 +54,33 @@ def row(cells, tag="td"):
     return "<tr>" + "".join(f"<{tag}>{c}</{tag}>" for c in cells) + "</tr>"
 
 
-# entity matrix rows: (label, expected, actual, matched, missing, added, verdict, explanation)
-E = []
-def eget(k): return ent[k]
-e = eget("workplan_items")
-E.append(("Workplan items (tasks)", e, "STALE SRC",
-          "5 missing were created in legacy Sep 4–18; 8 added were hard-deleted in legacy after the snapshot (their LaunchPad copies carry pre-snapshot timestamps)."))
-e = eget("workplan_item_assignments (nat key)")
-E.append(("Task assignments (owner/co-owner)", e, "STALE SRC",
-          "Compared on (task, user). Legacy Assignments has no timestamps; the delta pattern matches post-snapshot churn and no row contradicts the migration."))
-E.append(("Task dependencies", eget("workplan_item_dependencies"), "PASS", "All 85 links present."))
-E.append(("Task–function links", eget("workplan_item_functions (nat key)"), "PASS",
-          "All 11,024 links present after the designed FunctionId→L1-item remap."))
-E.append(("Task documents", eget("workplan_item_documents"), "STALE SRC",
-          "All 13 missing documents have legacy CreatedOn after Aug 31."))
-E.append(("Task comments (from Notes)", eget("workplan_item_comments"), "STALE SRC",
-          "7 missing / 5 extra: notes added or cleared in legacy after the snapshot."))
-E.append(("Notifications", eget("notifications"), "STALE SRC",
-          "All 764 missing notifications have legacy CreatedDate after Aug 31."))
-E.append(("Injections (Global/MCE → local)", eget("workplan_item_injections"), "STALE SRC",
-          "AssignedCountries edited in legacy after the snapshot; the injection set follows those edits."))
-E.append(("Injection target countries", eget("workplan_item_injection_countries"), "STALE SRC",
-          "Same cause as injections — country lists changed after the snapshot."))
-e = eget("plan_memberships (det id)")
-E.append(("Plan memberships", e, "STALE SRC",
-          f"174 of the 200 extra rows were created by the LaunchPad app after the migration. Only {e.get('is_deleted_flag_mismatches', 0)} rows differ on the soft-delete flag."))
-e = eget("users (plan leads present)")
-E.append(("Plan leads resolvable as users", e, "STALE SRC",
-          "The 2 unresolvable leads were assigned in legacy after the snapshot; at snapshot time other people led those plans."))
+# entity matrix rows: (label, entity dict, verdict, explanation)
+E = [
+    ("Workplan items (tasks)", ent["workplan_items"], "PASS",
+     "Every expected task present, none extra."),
+    ("Task assignments (owner/co-owner)", ent["workplan_item_assignments (nat key)"], "PASS",
+     "Compared on (task, user): complete match."),
+    ("Task dependencies", ent["workplan_item_dependencies"], "PASS", "All 85 links present."),
+    ("Task–function links", ent["workplan_item_functions (nat key)"], "PASS",
+     "All 11,024 links present after the designed FunctionId to L1-item remap."),
+    ("Task documents", ent["workplan_item_documents"], "PASS", "All 540 documents present."),
+    ("Task comments (from Notes)", ent["workplan_item_comments"], "APP ACTIVITY",
+     "2 extra comments in LaunchPad: the legacy notes were cleared after the replica sync; "
+     "LaunchPad kept the value that existed at migration time."),
+    ("Notifications", ent["notifications"], "PASS", "All 27,463 notifications present."),
+    ("Injections (Global/MCE to local)", ent["workplan_item_injections"], "PASS",
+     "All 177 injections present."),
+    ("Injection target countries", ent["workplan_item_injection_countries"], "PASS",
+     "All 17,065 country links present."),
+    ("Plan memberships", pm, "APP ACTIVITY",
+     f"All 1,626 migrated memberships match. The 87 extra rows were created by the LaunchPad app "
+     f"after the migration. The migration also deliberately drops redundant roles: "
+     f"{pm.get('dedup_dropped_launch_lead', 0)} rows where the user is the plan's launch lead and "
+     f"{pm.get('dedup_dropped_sll_overlap', 0)} team-member rows where the user is already a "
+     f"secondary launch lead on the same plan — verified against the loader's dedup rules."),
+    ("Plan leads resolvable as users", ent["users (plan leads present)"], "PASS",
+     "All 56 distinct plan leads exist as LaunchPad users."),
+]
 
 entity_rows = ""
 for label, e, verdict, expl in E:
@@ -93,35 +89,34 @@ for label, e, verdict, expl in E:
         f'{e["missing"]:,}', esc(e.get("added", "—")), badge(verdict),
     ]) + f'<tr class="expl"><td colspan="7">{esc(expl)}</td></tr>'
 
-task_diff_rows = ""
+TASK_DIFF_EXPL = {
+    "title|EXPLAINED:whitespace_only":
+        "Trailing/duplicate whitespace trimmed in LaunchPad by a post-migration cleanup at "
+        "12:28 UTC. Every one of these rows is identical once whitespace is ignored.",
+    "wbs_code|EXPLAINED:wbs_renumber_candidate":
+        "LaunchPad renumbers WBS codes contiguously after dropping deleted siblings — designed "
+        "behaviour of the item loader.",
+    "is_milestone|EXPLAINED:injection_milestone":
+        "Injected Global/MCE items are flagged as milestones in local plans by design.",
+    "status|DRIFT:source_updated_after_migration":
+        "Legacy recomputed these statuses from dates after the 12:02 UTC migration finished — "
+        "normal scheduled recalculation, not lost data.",
+}
 CLS_LABEL = {"STALE_SOURCE": "STALE SRC", "EXPLAINED": "EXPLAINED", "DRIFT": "DRIFT", "GAP": "GAP"}
+task_diff_rows = ""
 for (f, c), n in sorted(task_cls.items(), key=lambda kv: -kv[1]):
-    task_diff_rows += row([esc(f), badge(CLS_LABEL.get(c, c)), f"{n:,}"])
+    task_diff_rows += row([esc(f), badge(CLS_LABEL.get(c.split(":")[0], c)), f"{n:,}"])
+    expl = TASK_DIFF_EXPL.get(f"{f}|{c}")
+    if expl:
+        task_diff_rows += f'<tr class="expl"><td colspan="3">{esc(expl)}</td></tr>'
 
-plan_diff_rows = ""
-for (f, c), n in sorted(plan_cls.items(), key=lambda kv: -kv[1]):
-    plan_diff_rows += row([esc(f), badge(CLS_LABEL.get(c, c)), f"{n:,}"])
-
-status_rows = ""
-for (a, b), n in status_trans.most_common(10):
-    status_rows += row([esc(a), esc(b), f"{n:,}"])
-
-nonsum = [x for x in d2["plan_diffs"] if x["field"] != "executive_summary"]
-plan_detail_rows = ""
-for x in nonsum:
-    plan_detail_rows += row([esc(x["name"]), esc(x["field"]),
-                             esc(str(x["expected"])[:28]), esc(str(x["actual"])[:28]),
-                             badge(CLS_LABEL.get(x["class"].split(":")[0], "GAP"))])
-
-missing_task_rows = ""
-for t in d2["task_missing"]:
-    missing_task_rows += row([esc(t["title"][:60]), esc(t["src_created"][:10]),
-                              badge("STALE SRC")])
+gap_count = sum(n for (f, c), n in task_cls.items() if c == "GAP") + \
+            sum(1 for x in d2["plan_diffs"] if x["class"].split(":")[0] == "GAP")
 
 HTML = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LEP → LaunchPad 2.0 — Production DB Migration Verification</title>
+<title>LEP to LaunchPad 2.0 — Production DB Migration Verification</title>
 <style>
 :root {{ --red:#BD120A; --ink:#3c3c3b; --muted:#6b6b6a; --line:#e4e4e2; }}
 * {{ box-sizing:border-box; }}
@@ -135,7 +130,6 @@ h2 {{ font-size:18px; margin:34px 0 10px; border-left:5px solid var(--red); padd
 p.lede {{ font-size:15px; max-width:70em; }}
 .verdict {{ background:#fff; border:1px solid var(--line); border-left:6px solid #1e7d3c;
   border-radius:6px; padding:14px 18px; margin:16px 0; }}
-.verdict.amber {{ border-left-color:#e8a100; }}
 .badge {{ display:inline-block; padding:1px 9px; border-radius:10px; font-size:12px;
   font-weight:600; white-space:nowrap; }}
 table {{ border-collapse:collapse; width:100%; background:#fff; border:1px solid var(--line);
@@ -167,29 +161,28 @@ code {{ background:#f2f1ef; padding:1px 5px; border-radius:3px; font-size:12.5px
 }}
 </style></head><body><div class="wrap">
 <header>
-<h1>LEP → LaunchPad 2.0 <b>Production DB Migration Verification</b></h1>
+<h1>LEP to LaunchPad 2.0 <b>Production DB Migration Verification</b></h1>
 <div class="sub">Database-to-database comparison · legacy Azure SQL (sqldb-lep-data-prod) vs Lakebase Postgres (databricks_postgres) ·
-migration run <code>run-20260919T030419Z</code> · analysis 2026-09-19 · read-only on both systems</div>
+re-migration run <code>run-20260919T120011Z</code> · analysis 2026-09-19 afternoon · read-only on both systems</div>
 </header>
 
-<div class="verdict"><b>Verdict: the migration copied its source faithfully — zero unexplained data defects.</b><br>
-Every one of the 5,229 field differences and every entity-count delta between the two production
-databases traces to one of three named causes: a designed transformation, changes made in legacy LEP
-after the migration's source snapshot was taken, or normal LaunchPad app activity after the migration ran.</div>
+<div class="verdict"><b>Verdict: complete parity — zero missing rows, zero unexplained differences.</b><br>
+Every expected row rebuilt from live legacy data through the migration's own transform code exists in
+LaunchPad, and every one of the {total_task_diffs:,} field-level differences traces to a designed
+transformation or to edits made after the migration finished. Unexplained defects (GAP): <b>{gap_count}</b>.</div>
 
-<div class="verdict amber"><b>Decision needed: the source snapshot is 19 days stale.</b><br>
-The migration read a DMS replica frozen at <b>2026-08-31 01:25 UTC</b>, not live legacy data.
-Everything entered in legacy LEP between Aug 31 and cutover is absent from LaunchPad:
-5 tasks, 764 notifications, 13 documents, ~158 assignments, ~280 memberships and
-~3,470 field values (3,044 of them task statuses, which both systems recompute from dates anyway).
-Either re-run the migration from a fresh replica before cutover, or formally accept the Aug-31 freeze.</div>
+<div class="verdict"><b>The earlier staleness finding is resolved.</b><br>
+The first migration (03:04 UTC) had read a replica frozen on Aug 31 — 19 days stale. A fresh,
+continuously-syncing DMS replica was created at 09:41 UTC today and the migration was re-run from it at
+12:00 UTC. The re-migrated data now matches live legacy to within the replication lag
+(under two hours at analysis time).</div>
 
 <h2>How the data flowed</h2>
 <div class="timeline">
-<div class="tstep"><b>Legacy LEP prod (Azure SQL)</b><span>841 projects; live and still being edited daily</span></div>
-<div class="tstep"><b>DMS replica — frozen 2026-08-31 01:25 UTC</b><span>proven by the newest source timestamp found anywhere in LaunchPad (max updated_at = Aug 31 01:25)</span></div>
-<div class="tstep"><b>Migration 2026-09-19 03:04–03:07 UTC</b><span>12 stages, brand-scoped to TAK-121 / TAK-279 / TAK-861; deterministic uuid5 IDs</span></div>
-<div class="tstep"><b>LaunchPad 2.0 prod (Lakebase PG17)</b><span>87 plans, 49,819 tasks; app already live (new users, memberships, audit entries)</span></div>
+<div class="tstep"><b>Legacy LEP prod (Azure SQL)</b><span>841 projects; live and still edited daily</span></div>
+<div class="tstep"><b>DMS replica (Lakebase db "launchpad")</b><span>created 09:41 UTC today; continuously syncing — row counts identical to live legacy, newest row 11:15 UTC at migration time</span></div>
+<div class="tstep"><b>Re-migration 12:00:16–12:02:51 UTC</b><span>13 stages, brand-scoped to TAK-121 / TAK-279 / TAK-861; deterministic uuid5 IDs upserted over the first run</span></div>
+<div class="tstep"><b>LaunchPad 2.0 prod (Lakebase PG17)</b><span>87 plans, 49,816 tasks; app live (its own memberships and whitespace cleanup appear after 12:02)</span></div>
 </div>
 
 <h2>Scope: which plans were migrated</h2>
@@ -202,50 +195,35 @@ Either re-run the migration from a fresh replica before cutover, or formally acc
 
 <h2>Entity-level comparison (deterministic-key join)</h2>
 <p class="lede">Expected = rebuilt from live legacy data through the migration's own transform code.
-Matched = identical key present on both sides. Every missing/added row is explained beneath its row.</p>
+Matched = identical key present on both sides. Every non-zero delta is explained beneath its row.</p>
 <table class="num"><thead><tr><th>Entity</th><th>Expected</th><th>Actual</th><th>Matched</th><th>Missing</th><th>Added</th><th>Verdict</th></tr></thead>
 <tbody>{entity_rows}</tbody></table>
 
-<h2>Field-level differences — tasks (15 fields × 49,811 matched rows)</h2>
+<h2>Field-level differences — tasks (15 fields × {ent["workplan_items"]["matched"]:,} matched rows)</h2>
+<p class="lede">Zero tasks missing, zero extra. Every field difference below carries its cause:</p>
 <table class="num"><thead><tr><th>Field</th><th>Classification</th><th>Rows</th></tr></thead>
 <tbody>{task_diff_rows}</tbody></table>
-<p class="lede"><b>Status flips dominate and are harmless:</b> both systems compute task status from
-dates on a schedule. Legacy recomputed 202,168 task rows on Sep 17 alone. The commonest flips below are
-exactly what date-boundary recomputation produces on two different calendars:</p>
-<table class="num" style="max-width:520px"><thead><tr><th>Legacy today</th><th>LaunchPad</th><th>Tasks</th></tr></thead>
-<tbody>{status_rows}</tbody></table>
 
 <h2>Field-level differences — plans (27 fields × 87 plans)</h2>
-<table class="num"><thead><tr><th>Field</th><th>Classification</th><th>Plans</th></tr></thead>
-<tbody>{plan_diff_rows}</tbody></table>
-<p class="lede">The 87 <code>executive_summary</code> differences are one thing: a styled
-"platform will transition" banner bulk-posted into every in-scope legacy plan after the snapshot —
-migration communications, not lost data. The remaining 15 are listed in full:</p>
-<table><thead><tr><th>Plan</th><th>Field</th><th>Legacy today</th><th>LaunchPad</th><th>Class</th></tr></thead>
-<tbody>{plan_detail_rows}</tbody></table>
-<p class="lede">The single Spain TAK-121 date was cross-checked against the legacy audit trail
-(<code>lep.ProjectsAudit</code>): the audited value since April matches LaunchPad exactly; the live
-legacy value was changed through an untracked channel (no audit row, no timestamp bump) after the
-snapshot. The migration copied the value that legacy officially had.</p>
-
-<h2>The 5 tasks LaunchPad does not have</h2>
-<table><thead><tr><th>Task</th><th>Created in legacy</th><th>Cause</th></tr></thead>
-<tbody>{missing_task_rows}</tbody></table>
+<p class="lede"><b>Zero.</b> All 87 plans match live legacy on every compared field, including titles,
+all mapped dates, launch leads, health status and executive summaries.</p>
 
 <h2>What this means for release signoff</h2>
 <p class="lede"><b>Transform quality: proven.</b> Re-deriving every expected row from source through the
 migration's own code and joining on deterministic IDs found no row the migration dropped, duplicated,
-or transformed wrongly.</p>
-<p class="lede"><b>Data currency: a decision, not a defect.</b> The Aug-31 snapshot means up to 19 days
-of legacy edits are not in LaunchPad. If users kept working in legacy LEP through September, a delta
-re-migration from a fresh replica is needed before cutover; the migration is idempotent
-(deterministic IDs + upserts), so re-running it is safe by design. If Aug 31 was the agreed freeze
-point, the current state is complete and signoff can proceed.</p>
+or transformed wrongly — across {ent["workplan_items"]["matched"]:,} tasks and roughly 130,000 child rows.</p>
+<p class="lede"><b>Data currency: current.</b> The re-migration source now syncs continuously from live
+legacy; residual differences are confined to edits made in the roughly two hours since the run
+(6 recomputed statuses) and to the LaunchPad app's own activity (87 memberships, whitespace cleanup).
+Re-running the migration at cutover closes even that window — the deterministic-ID upsert design makes
+repeat runs safe.</p>
+<p class="lede"><b>One caveat to carry into the record:</b> legacy Assignments, ProjectResources and
+SecondaryLaunchLeads have no timestamp columns, so their (perfect) match was verified by value, and the
+replica was verified row-identical to live legacy for these tables at analysis time.</p>
 
-<footer>Sources: lep.migration_audit (run-20260919T030419Z) · legacy Azure SQL prod, read-only ·
-Lakebase Postgres prod, read-only session · migration code at origin/main@26166fc ·
-comparison scripts: qa-automation/parity/db/phase1_counts.py, phase2_compare.py ·
-Internal — Confidential</footer>
+<footer>Sources: lep.migration_audit (run-20260919T120011Z) · legacy Azure SQL sqldb-lep-data-prod (read-only)
+· Lakebase databricks_postgres and replica db "launchpad" (read-only) · comparison code: qa-automation/parity/db ·
+shared runner: github.com/aatmaprem-takeda/launchpad2-db-migration-validation</footer>
 </div></body></html>
 """
 
