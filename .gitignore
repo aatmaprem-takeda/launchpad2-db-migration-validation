@@ -1,0 +1,8 @@
+.env
+*.env
+!.env.example
+out/*
+!out/.gitkeep
+__pycache__/
+*.pyc
+.venv/
